@@ -1,0 +1,173 @@
+# --- Auto-install required packages if missing ---
+import subprocess
+import sys
+
+required_packages = ['pygal', 'yfinance']
+
+for package in required_packages:
+    try:
+        __import__(package)
+    except ImportError:
+        print(f"Installing missing package: {package}")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+# --- Now safe to import ---
+import json
+import sqlite3
+from datetime import datetime
+import pygal
+import os
+import yfinance as yf
+import tkinter as tk
+from tkinter import messagebox
+
+# --- File paths ---
+JSON_FILE = r"C:\Users\PaulF\Desktop\Python\Week 10 Project\AllStocks.json"
+OUTPUT_DIR = r"C:\Users\PaulF\Desktop\Python\Week 10 Project\Assignment 10"
+DB_FILE = os.path.join(OUTPUT_DIR, "portfolio.db")
+GRAPH_SVG_FILE_1 = os.path.join(OUTPUT_DIR, "stock_portfolio.svg")
+GRAPH_SVG_FILE_2 = os.path.join(OUTPUT_DIR, "total_portfolio.svg")
+
+# --- Shares Owned ---
+shares_owned = {
+    "GOOG": 30,
+    "AAPL": 50,
+    "MSFT": 40,
+    "AMZN": 10
+}
+DEFAULT_SHARES = 10
+
+# --- Load JSON ---
+def load_stock_data(json_file):
+    with open(json_file, "r") as f:
+        return json.load(f)
+
+# --- Process Stock Data ---
+def process_stock_data(stock_data):
+    stocks = {}
+    all_dates_set = set()
+    for entry in stock_data:
+        symbol = entry['Symbol']
+        date_str = entry['Date']
+        try:
+            date_obj = datetime.strptime(date_str, "%d-%b-%y")
+        except ValueError:
+            continue
+        try:
+            close_price = float(entry['Close'])
+        except (ValueError, KeyError):
+            continue
+        shares = shares_owned.get(symbol, DEFAULT_SHARES)
+        value = close_price * shares
+        if symbol not in stocks:
+            stocks[symbol] = {}
+        stocks[symbol][date_obj] = value
+        all_dates_set.add(date_obj)
+    return stocks, sorted(all_dates_set)
+
+# --- Create Charts ---
+def create_charts(stocks, all_dates):
+    stock_chart = pygal.Line(x_label_rotation=45, show_minor_x_labels=False)
+    stock_chart.title = 'Stock Portfolio Value Over Time'
+    stock_chart.x_labels = [date.strftime('%Y-%m-%d') for date in all_dates]
+    stock_chart.x_labels_major = stock_chart.x_labels[::max(1, len(stock_chart.x_labels)//10)]
+
+    total_portfolio_values = []
+
+    for symbol in sorted(stocks.keys()):
+        values = []
+        for date in all_dates:
+            val = stocks[symbol].get(date)
+            values.append(val if val and val > 0 else None)
+        stock_chart.add(symbol, values)
+
+    for date in all_dates:
+        total_value = sum(stocks[symbol].get(date, 0) for symbol in stocks)
+        total_portfolio_values.append(total_value)
+
+    total_chart = pygal.Line(x_label_rotation=45, show_minor_x_labels=False)
+    total_chart.title = 'Total Portfolio Value Over Time'
+    total_chart.x_labels = [date.strftime('%Y-%m-%d') for date in all_dates]
+    total_chart.add("Total Value", total_portfolio_values)
+
+    stock_chart.render_to_file(GRAPH_SVG_FILE_1)
+    total_chart.render_to_file(GRAPH_SVG_FILE_2)
+
+# --- Store in SQLite ---
+def save_to_database(stocks):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS stock_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT,
+            date TEXT,
+            close REAL,
+            shares INTEGER,
+            value REAL
+        )
+    """)
+    for symbol, data in stocks.items():
+        for date_obj, value in data.items():
+            close_price = value / shares_owned.get(symbol, DEFAULT_SHARES)
+            cursor.execute("""
+                INSERT INTO stock_history (symbol, date, close, shares, value)
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                symbol,
+                date_obj.strftime('%Y-%m-%d'),
+                round(close_price, 2),
+                shares_owned.get(symbol, DEFAULT_SHARES),
+                round(value, 2)
+            ))
+    conn.commit()
+    conn.close()
+
+# --- Fetch Real-Time Prices ---
+def get_current_prices():
+    results = []
+    for symbol in shares_owned:
+        try:
+            stock = yf.Ticker(symbol)
+            price = stock.info['regularMarketPrice']
+            results.append(f"{symbol}: ${price:.2f}")
+        except Exception as e:
+            results.append(f"Could not fetch {symbol}: {e}")
+    return "\n".join(results)
+
+# --- GUI Setup ---
+def run_analysis():
+    try:
+        stock_data = load_stock_data(JSON_FILE)
+        stocks, all_dates = process_stock_data(stock_data)
+        create_charts(stocks, all_dates)
+        save_to_database(stocks)
+        messagebox.showinfo("Success", "✅ Analysis complete. SVG charts and DB saved.")
+    except Exception as e:
+        messagebox.showerror("Error", str(e))
+
+def show_prices():
+    prices = get_current_prices()
+    messagebox.showinfo("Current Stock Prices", prices)
+
+def launch_gui():
+    root = tk.Tk()
+    root.title("Stock Portfolio Analyzer")
+    root.geometry("400x200")
+
+    tk.Label(root, text="Portfolio Manager", font=("Arial", 16)).pack(pady=10)
+
+    tk.Button(root, text="Run Analysis", width=20, command=run_analysis).pack(pady=5)
+    tk.Button(root, text="Show Current Prices", width=20, command=show_prices).pack(pady=5)
+    tk.Button(root, text="Exit", width=20, command=root.quit).pack(pady=20)
+
+    root.mainloop()
+
+# --- Main ---
+if __name__ == "__main__":
+    if not os.path.exists(JSON_FILE):
+        print(f"\n❌ Error: Could not find AllStocks.json at:\n{JSON_FILE}")
+        sys.exit(1)
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
+    launch_gui()
